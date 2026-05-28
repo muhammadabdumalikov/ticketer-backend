@@ -21,7 +21,7 @@ RUN corepack enable && \
     pnpm config set fetch-retries 5
 COPY package.json ./
 COPY pnpm-lock.yaml* ./
-RUN pnpm install --prod --no-frozen-lockfile && pnpm store prune
+RUN pnpm install --prod --no-frozen-lockfile --ignore-scripts && pnpm store prune
 COPY --from=builder /app/dist ./dist
 EXPOSE 6000
 CMD ["node", "dist/main"]
