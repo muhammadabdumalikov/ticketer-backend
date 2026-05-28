@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: ticketer-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ticketer
+      POSTGRES_PASSWORD: ticketer
+      POSTGRES_DB: ticketer
+    ports:
+      - '5432:5432'
+    volumes:
+      - ticketer-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ticketer -d ticketer']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  ticketer-pgdata:
