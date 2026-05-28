@@ -13,14 +13,9 @@ export type Database = Kysely<DB>;
     {
       provide: KYSELY,
       inject: [ConfigService],
-      useFactory: (): Kysely<DB> => {
+      useFactory: (config: ConfigService): Kysely<DB> => {
         const pool = new Pool({
-          host: '116.202.26.85',
-          port: 5444,
-          user: 'postgres',
-          password:
-            'ShhnwfTp3KP0e3dHyCPNGLJ15vM4ol08YZ4El9449olA5RUdLOvrvTQRGay2JL3e',
-          database: 'ticketer',
+					connectionString: config.get<string>('databaseUrl'),
 					ssl: false,
           max: 10,
         });
