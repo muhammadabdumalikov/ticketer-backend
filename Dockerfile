@@ -17,5 +17,5 @@ COPY package.json ./
 COPY pnpm-lock.yaml* ./
 RUN pnpm install --prod --no-frozen-lockfile && pnpm store prune
 COPY --from=builder /app/dist ./dist
-EXPOSE 3000
+EXPOSE 6000
 CMD ["node", "dist/main"]
