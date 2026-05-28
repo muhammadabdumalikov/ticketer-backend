@@ -1,17 +1,13 @@
 import 'dotenv/config';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
-import { Kysely, PostgresDialect } from 'kysely';
-// kysely 0.29 ships Migrator behind a subpath export. Node honors `exports`
-// at runtime but TS's `node` moduleResolution doesn't — load via require()
-// and import the types via the dist path.
-import type {
-  Migration,
-  MigrationProvider,
-  Migrator as MigratorType,
-} from 'kysely/dist/migration/migrator';
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const { Migrator } = require('kysely/migration') as { Migrator: typeof MigratorType };
+import {
+  Kysely,
+  Migrator,
+  PostgresDialect,
+  type Migration,
+  type MigrationProvider,
+} from 'kysely';
 import { Pool } from 'pg';
 
 const MIGRATIONS_DIR = path.resolve(__dirname, 'migrations');
