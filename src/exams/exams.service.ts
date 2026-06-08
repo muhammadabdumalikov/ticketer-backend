@@ -11,6 +11,8 @@ import type { DB } from '../db/schema';
 import type { QuestionDto } from '../tickets/dto/question.dto';
 import type { CreateExamDto, ExamTicketDto, UpdateExamDto } from './dto/exam.dto';
 import { SessionsService } from '../sessions/sessions.service';
+import * as mammoth from 'mammoth';
+import { parseExamDocx, type ParsedDocxExam, type UploadedDocx } from './docx-parser';
 
 export interface ExamListItem {
   id: string;
@@ -180,8 +182,33 @@ export class ExamsService {
         .executeTakeFirstOrThrow();
 
       await this.replaceTickets(trx, exam.id, dto.subjectId, teacherId, dto.tickets);
-      return this.getOneWithTrx(trx, exam.id);
+      // Return only the new id — the client doesn't need the full tree, and
+      // re-reading hundreds of tickets/questions here just slows creation down.
+      return { id: exam.id };
     });
+  }
+
+  // ───────────── Import from .docx (parse only, no persistence) ─────────────
+  async parseDocx(file: UploadedDocx | undefined): Promise<ParsedDocxExam> {
+    if (!file || !file.buffer || file.size === 0) {
+      throw new BadRequestException('Файл не загружен.');
+    }
+    const name = (file.originalname ?? '').toLowerCase();
+    const isDocx =
+      name.endsWith('.docx') ||
+      file.mimetype ===
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+    if (!isDocx) {
+      throw new BadRequestException('Поддерживаются только файлы .docx.');
+    }
+    let rawText: string;
+    try {
+      const result = await mammoth.extractRawText({ buffer: file.buffer });
+      rawText = result.value;
+    } catch {
+      throw new BadRequestException('Не удалось прочитать файл .docx.');
+    }
+    return parseExamDocx(rawText);
   }
 
   // ───────────── Update ─────────────
@@ -220,21 +247,43 @@ export class ExamsService {
     authorId: string,
     tickets: ExamTicketDto[],
   ) {
-    for (let i = 0; i < tickets.length; i++) {
-      const t = tickets[i];
-      const position = i + 1;
-      const row = await trx
-        .insertInto('tickets')
-        .values({
-          examId,
-          subjectId,
-          authorId,
-          title: t.title?.trim() || `Билет №${position}`,
-          position,
-        } as any)
-        .returning(['id'])
-        .executeTakeFirstOrThrow();
-      await this.insertQuestions(trx, row.id, t.questions);
+    if (tickets.length === 0) return;
+
+    // 1. Bulk-insert all tickets in one statement, returning their generated
+    //    ids keyed by position (Postgres RETURNING order isn't guaranteed, so
+    //    we map by the position we set rather than relying on row order).
+    const ticketRows = tickets.map((t, i) => ({
+      examId,
+      subjectId,
+      authorId,
+      title: t.title?.trim() || `Билет №${i + 1}`,
+      position: i + 1,
+    }));
+    const inserted = await trx
+      .insertInto('tickets')
+      .values(ticketRows as any)
+      .returning(['id', 'position'])
+      .execute();
+    const idByPosition = new Map<number, string>(
+      inserted.map((r) => [r.position as number, r.id as string]),
+    );
+
+    // 2. Bulk-insert every question across all tickets in a single statement.
+    const questionRows = tickets.flatMap((t, i) => {
+      const ticketId = idByPosition.get(i + 1)!;
+      return t.questions.map((q, idx) => ({
+        ticketId,
+        position: idx,
+        type: q.type,
+        text: q.text,
+        points: q.points,
+        timeSec: q.time,
+        difficulty: q.difficulty,
+        payload: JSON.stringify(this.extractPayload(q)),
+      }));
+    });
+    if (questionRows.length > 0) {
+      await trx.insertInto('questions').values(questionRows as any).execute();
     }
   }
 

@@ -9,15 +9,26 @@ import {
   Patch,
   Post,
   Query,
+  UploadedFile,
   UseGuards,
+  UseInterceptors,
 } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
+import { FileInterceptor } from '@nestjs/platform-express';
+import {
+  ApiBearerAuth,
+  ApiBody,
+  ApiConsumes,
+  ApiOperation,
+  ApiQuery,
+  ApiTags,
+} from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { PublicUser } from '../users/users.service';
 import { ExamsService } from './exams.service';
 import { CreateExamDto, UpdateExamDto } from './dto/exam.dto';
 import { QuestionDto } from '../tickets/dto/question.dto';
+import type { UploadedDocx } from './docx-parser';
 import { Type } from 'class-transformer';
 import { IsArray, IsOptional, IsString, ValidateNested } from 'class-validator';
 
@@ -57,6 +68,26 @@ export class ExamsController {
   @ApiOperation({ summary: 'Create exam + its first ticket atomically' })
   create(@CurrentUser() user: PublicUser, @Body() dto: CreateExamDto) {
     return this.exams.create(user.id, dto);
+  }
+
+  @Post('exams/parse-docx')
+  @ApiOperation({
+    summary:
+      'Parse an uploaded .docx into exam tickets + verbal questions (no persistence). ' +
+      'Each "N-variant" line becomes a ticket; each bullet under it becomes a question.',
+  })
+  @ApiConsumes('multipart/form-data')
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: { file: { type: 'string', format: 'binary' } },
+    },
+  })
+  @UseInterceptors(
+    FileInterceptor('file', { limits: { fileSize: 5 * 1024 * 1024 } }),
+  )
+  parseDocx(@CurrentUser() _user: PublicUser, @UploadedFile() file: UploadedDocx) {
+    return this.exams.parseDocx(file);
   }
 
   @Get('exams/:id')
