@@ -19,7 +19,10 @@ async function bootstrap() {
     }),
   );
   app.enableCors({
-    origin: config.get<string>('corsOrigin'),
+    // Allow any origin. We reflect the request origin (`origin: true`) rather
+    // than '*' because credentials (the httpOnly session cookie) are enabled,
+    // and the CORS spec forbids '*' together with Access-Control-Allow-Credentials.
+    origin: true,
     credentials: true,
   });
 
