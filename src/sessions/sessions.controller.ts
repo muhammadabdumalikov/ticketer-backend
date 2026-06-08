@@ -63,6 +63,18 @@ export class SessionsController {
     return this.sessions.getRoster(user.id, id);
   }
 
+  @Get(':id/members/:memberId/ticket')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth('jwt')
+  @ApiOperation({ summary: "[teacher] The ticket id assigned to a specific room member" })
+  getMemberTicket(
+    @CurrentUser() user: PublicUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('memberId', ParseUUIDPipe) memberId: string,
+  ) {
+    return this.sessions.getAssignedTicketId(user.id, id, memberId);
+  }
+
   @Post(':id/start')
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth('jwt')

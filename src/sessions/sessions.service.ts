@@ -129,6 +129,22 @@ export class SessionsService {
       .execute();
   }
 
+  /**
+   * The ticket currently assigned to one room member — read fresh so the
+   * proctor always grades the student's actual билет, never the session default.
+   */
+  async getAssignedTicketId(teacherId: string, sessionId: string, memberId: string) {
+    await this.requireOwned(teacherId, sessionId);
+    const member = await this.db
+      .selectFrom('roomMembers')
+      .select(['assignedTicketId'])
+      .where('id', '=', memberId)
+      .where('sessionId', '=', sessionId)
+      .executeTakeFirst();
+    if (!member) throw new NotFoundException('Member not found');
+    return { assignedTicketId: member.assignedTicketId };
+  }
+
   async start(teacherId: string, id: string) {
     const session = await this.requireOwned(teacherId, id);
     if (session.status === 'live') return session;
@@ -371,7 +387,10 @@ export class SessionsService {
         id: member.id,
         name: member.name,
         groupName: member.groupName,
+        studentNumber: member.studentNumber ?? null,
+        assignedTicketId: member.assignedTicketId ?? null,
         online: true,
+        joinedAt: member.joinedAt,
       },
     });
 
