@@ -21,11 +21,15 @@ export type SessionEvent =
   | 'session:tick'
   | 'verbal:status'
   | 'grade:save'
+  | 'member:presence'
   | 'session:end';
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 interface SocketAuth {
   teacherId?: string;
   memberId?: string;
+  sessionId?: string;
 }
 
 @Injectable()
@@ -55,11 +59,17 @@ export class SessionsGateway implements OnGatewayConnection, OnGatewayDisconnect
 
       const auth: SocketAuth = {};
 
+      // Rooms are joined here, during the handshake, rather than by the
+      // client's `join` emit — that emit can race ahead of this async check.
       if (bearer) {
         const payload = await this.jwt.verifyAsync<JwtPayload>(bearer, {
           secret: this.config.get<string>('jwt.secret'),
         });
         auth.teacherId = payload.sub;
+        client.data.auth = auth;
+        if (sessionId && (await this.teacherOwns(payload.sub, sessionId))) {
+          client.join(this.staffRoomFor(sessionId));
+        }
       } else if (sessionToken && sessionId) {
         const member = await this.db
           .selectFrom('roomMembers')
@@ -69,12 +79,14 @@ export class SessionsGateway implements OnGatewayConnection, OnGatewayDisconnect
           .executeTakeFirst();
         if (!member) throw new UnauthorizedException('Invalid session token');
         auth.memberId = member.id;
-        client.join(this.roomFor(sessionId));
+        auth.sessionId = sessionId;
+        client.data.auth = auth;
+        client.join([this.roomFor(sessionId), this.memberRoomFor(member.id)]);
+        await this.setPresence(sessionId, member.id, true);
       } else {
         throw new UnauthorizedException('Missing credentials');
       }
 
-      client.data.auth = auth;
       this.logger.log(`Socket connected: ${client.id} (${auth.teacherId ? 'teacher' : 'student'})`);
     } catch (err) {
       this.logger.warn(`Socket auth failed: ${(err as Error).message}`);
@@ -82,23 +94,92 @@ export class SessionsGateway implements OnGatewayConnection, OnGatewayDisconnect
     }
   }
 
-  handleDisconnect(client: Socket): void {
+  async handleDisconnect(client: Socket): Promise<void> {
     this.logger.log(`Socket disconnected: ${client.id}`);
+    const auth = client.data.auth as SocketAuth | undefined;
+    if (!auth?.memberId || !auth.sessionId) return;
+    try {
+      // The same student may still be connected from another tab or device.
+      const sockets = await this.server.in(this.roomFor(auth.sessionId)).fetchSockets();
+      const stillHere = sockets.some(
+        (s) => s.id !== client.id && (s.data.auth as SocketAuth | undefined)?.memberId === auth.memberId,
+      );
+      if (!stillHere) await this.setPresence(auth.sessionId, auth.memberId, false);
+    } catch (err) {
+      this.logger.warn(`Presence update failed: ${(err as Error).message}`);
+    }
   }
 
   @SubscribeMessage('join')
   async onJoin(@ConnectedSocket() client: Socket, @MessageBody() body: { sessionId: string }) {
     if (!body?.sessionId) return { ok: false, error: 'sessionId required' };
-    client.join(this.roomFor(body.sessionId));
+    const auth = client.data.auth as SocketAuth | undefined;
+    if (!auth) return { ok: false, error: 'not authenticated' };
+    // Students are placed in their own session's room during the handshake.
+    if (auth.memberId) return { ok: auth.sessionId === body.sessionId };
+    if (!auth.teacherId || !(await this.teacherOwns(auth.teacherId, body.sessionId))) {
+      return { ok: false, error: 'forbidden' };
+    }
+    client.join(this.staffRoomFor(body.sessionId));
     return { ok: true };
   }
 
+  /** Every student in the session and its proctor. */
   broadcast(sessionId: string, event: SessionEvent, payload: unknown): void {
+    this.server.to([this.roomFor(sessionId), this.staffRoomFor(sessionId)]).emit(event, payload);
+  }
+
+  toStudents(sessionId: string, event: SessionEvent, payload: unknown): void {
     this.server.to(this.roomFor(sessionId)).emit(event, payload);
   }
 
+  toStaff(sessionId: string, event: SessionEvent, payload: unknown): void {
+    this.server.to(this.staffRoomFor(sessionId)).emit(event, payload);
+  }
+
+  /** One student (all their tabs/devices) and the proctor. */
+  toMember(sessionId: string, memberId: string, event: SessionEvent, payload: unknown): void {
+    this.server.to([this.memberRoomFor(memberId), this.staffRoomFor(sessionId)]).emit(event, payload);
+  }
+
+  async isMemberConnected(memberId: string): Promise<boolean> {
+    const sockets = await this.server.in(this.memberRoomFor(memberId)).fetchSockets();
+    return sockets.length > 0;
+  }
+
+  private async setPresence(sessionId: string, memberId: string, online: boolean): Promise<void> {
+    await this.db
+      .updateTable('roomMembers')
+      .set({ online, lastSeenAt: new Date() })
+      .where('id', '=', memberId)
+      .execute();
+    this.toStaff(sessionId, 'member:presence', { sessionId, memberId, online });
+  }
+
+  private async teacherOwns(teacherId: string, sessionId: string): Promise<boolean> {
+    // Postgres rejects malformed uuids with an error rather than "no rows".
+    if (!UUID_RE.test(sessionId)) return false;
+    const row = await this.db
+      .selectFrom('sessions')
+      .select(['id'])
+      .where('id', '=', sessionId)
+      .where('teacherId', '=', teacherId)
+      .executeTakeFirst();
+    return !!row;
+  }
+
+  // Students and the proctor sit in separate rooms so teacher-only events
+  // (grades, presence, ticket assignments) never reach students' browsers.
   private roomFor(sessionId: string): string {
     return `session:${sessionId}`;
+  }
+
+  private staffRoomFor(sessionId: string): string {
+    return `session:${sessionId}:staff`;
+  }
+
+  private memberRoomFor(memberId: string): string {
+    return `member:${memberId}`;
   }
 
   private extractBearer(client: Socket): string | undefined {

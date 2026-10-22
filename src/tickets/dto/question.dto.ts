@@ -10,10 +10,24 @@ import {
   IsString,
   Max,
   Min,
+  ValidateBy,
   ValidateNested,
 } from 'class-validator';
 
 export type QuestionType = 'single' | 'multi' | 'text' | 'numeric' | 'verbal';
+
+/** Verbal answers are graded by the teacher on a 5-point scale. */
+export const MAX_VERBAL_POINTS = 5;
+
+const VerbalPointsCap = () =>
+  ValidateBy({
+    name: 'verbalPointsCap',
+    validator: {
+      validate: (value, args) =>
+        (args?.object as { type?: QuestionType }).type !== 'verbal' || value <= MAX_VERBAL_POINTS,
+      defaultMessage: () => `points must not exceed ${MAX_VERBAL_POINTS} for verbal questions`,
+    },
+  });
 
 export class QuestionPayloadDto {
   // single/multi
@@ -35,8 +49,8 @@ export class QuestionDto {
   @IsString()
   text!: string;
 
-  @ApiProperty({ example: 5, minimum: 0, maximum: 100 })
-  @IsInt() @Min(0) @Max(100)
+  @ApiProperty({ example: 5, minimum: 0, maximum: 100, description: `Verbal questions: max ${MAX_VERBAL_POINTS}` })
+  @IsInt() @Min(0) @Max(100) @VerbalPointsCap()
   points!: number;
 
   @ApiProperty({ example: 60, description: 'Per-question time limit (seconds). For verbal: soft cap.' })

@@ -88,7 +88,8 @@ export class SubjectsService {
    * the launch / share / random-ticket flow end-to-end without hand-crafting
    * test data.
    */
-  async createMock(teacherId: string): Promise<SubjectDto> {
+  async createMock(teacherId: string, locale: DemoLocale = 'ru'): Promise<SubjectDto> {
+    const t = (ru: string, uz: string) => (locale === 'uz' ? uz : ru);
     const codeSuffix = Math.floor(1000 + Math.random() * 9000);
     const subjectId = await this.db.transaction().execute(async (trx) => {
       // 1) subject
@@ -96,9 +97,9 @@ export class SubjectsService {
         .insertInto('subjects')
         .values({
           teacherId,
-          name: 'Демо: Основы алгоритмов',
+          name: t('Демо: Основы алгоритмов', 'Demo: Algoritmlar asoslari'),
           code: `DEMO-${codeSuffix}`,
-          sigil: 'ДА',
+          sigil: t('ДА', 'DA'),
           color: '#0F62FE',
           status: 'active',
         } as any)
@@ -111,9 +112,14 @@ export class SubjectsService {
         .values({
           subjectId: subj.id,
           authorId: teacherId,
-          title: 'Демо-экзамен — Алгоритмы и структуры данных',
-          description:
+          title: t(
+            'Демо-экзамен — Алгоритмы и структуры данных',
+            "Demo-imtihon — Algoritmlar va ma'lumotlar tuzilmalari",
+          ),
+          description: t(
             'Учебный пример, чтобы попробовать запуск, раздачу билетов и сбор ответов.',
+            "Ishga tushirish, biletlarni tarqatish va javoblarni yig'ishni sinab ko'rish uchun o'quv namunasi.",
+          ),
           durationMin: 60,
           attempts: 1,
           visibility: 'private',
@@ -124,7 +130,7 @@ export class SubjectsService {
         .executeTakeFirstOrThrow();
 
       // 3) tickets + questions
-      const ticketSpecs = mockTickets();
+      const ticketSpecs = mockTickets(t);
       for (let i = 0; i < ticketSpecs.length; i++) {
         const ts = ticketSpecs[i];
         const ticket = await trx
@@ -133,6 +139,7 @@ export class SubjectsService {
             examId: exam.id,
             subjectId: subj.id,
             authorId: teacherId,
+            // canonical auto-title; clients show it in the viewer's language
             title: `Билет №${i + 1}`,
             position: i + 1,
           } as any)
@@ -180,6 +187,8 @@ export class SubjectsService {
   }
 }
 
+type DemoLocale = 'ru' | 'uz';
+
 interface MockQuestionSpec {
   type: 'single' | 'multi' | 'text' | 'numeric' | 'verbal';
   text: string;
@@ -193,13 +202,14 @@ interface MockTicketSpec {
   questions: MockQuestionSpec[];
 }
 
-function mockTickets(): MockTicketSpec[] {
+/** `t(ru, uz)` picks the demo text in the teacher's interface language. */
+function mockTickets(t: (ru: string, uz: string) => string): MockTicketSpec[] {
   return [
     {
       questions: [
         {
           type: 'single',
-          text: 'Какая временная сложность бинарного поиска?',
+          text: t('Какая временная сложность бинарного поиска?', 'Ikkilik qidiruvning vaqt murakkabligi qanday?'),
           points: 5,
           time: 60,
           difficulty: 'easy',
@@ -207,7 +217,10 @@ function mockTickets(): MockTicketSpec[] {
         },
         {
           type: 'numeric',
-          text: 'Сколько узлов в полном двоичном дереве высоты 3 (корень — высота 0)?',
+          text: t(
+            'Сколько узлов в полном двоичном дереве высоты 3 (корень — высота 0)?',
+            "Balandligi 3 bo'lgan to'liq ikkilik daraxtda nechta tugun bor (ildiz — balandlik 0)?",
+          ),
           points: 5,
           time: 90,
           difficulty: 'medium',
@@ -215,13 +228,18 @@ function mockTickets(): MockTicketSpec[] {
         },
         {
           type: 'verbal',
-          text: 'Объясните принцип работы алгоритма быстрой сортировки. Какая у него сложность в среднем случае?',
-          points: 10,
+          text: t(
+            'Объясните принцип работы алгоритма быстрой сортировки. Какая у него сложность в среднем случае?',
+            "Tez saralash (quicksort) algoritmining ishlash tamoyilini tushuntiring. O'rtacha holatda uning murakkabligi qanday?",
+          ),
+          points: 5,
           time: 180,
           difficulty: 'medium',
           payload: {
-            rubric:
+            rubric: t(
               'Должен упомянуть: выбор опорного элемента, разбиение, рекурсия, средняя сложность O(n log n).',
+              "Aytib o'tishi kerak: tayanch elementni tanlash, bo'lish, rekursiya, o'rtacha murakkablik O(n log n).",
+            ),
           },
         },
       ],
@@ -230,23 +248,26 @@ function mockTickets(): MockTicketSpec[] {
       questions: [
         {
           type: 'multi',
-          text: 'Какие из сортировок имеют сложность O(n log n) в среднем случае?',
+          text: t(
+            'Какие из сортировок имеют сложность O(n log n) в среднем случае?',
+            "Qaysi saralash algoritmlari o'rtacha holatda O(n log n) murakkablikka ega?",
+          ),
           points: 6,
           time: 90,
           difficulty: 'medium',
           payload: {
             answers: [
-              'Пузырьковая сортировка',
-              'Сортировка слиянием',
-              'Быстрая сортировка',
-              'Сортировка вставками',
+              t('Пузырьковая сортировка', 'Pufakchali saralash'),
+              t('Сортировка слиянием', 'Birlashtirib saralash'),
+              t('Быстрая сортировка', 'Tez saralash'),
+              t('Сортировка вставками', "Qo'yib saralash"),
             ],
             correct: [1, 2],
           },
         },
         {
           type: 'text',
-          text: 'Что означает аббревиатура BST?',
+          text: t('Что означает аббревиатура BST?', 'BST qisqartmasi nimani anglatadi?'),
           points: 4,
           time: 60,
           difficulty: 'easy',
@@ -254,12 +275,18 @@ function mockTickets(): MockTicketSpec[] {
         },
         {
           type: 'verbal',
-          text: 'Опишите разницу между стеком и очередью. Приведите примеры использования.',
-          points: 10,
+          text: t(
+            'Опишите разницу между стеком и очередью. Приведите примеры использования.',
+            "Stek va navbat o'rtasidagi farqni tushuntiring. Qo'llanilishiga misollar keltiring.",
+          ),
+          points: 5,
           time: 180,
           difficulty: 'medium',
           payload: {
-            rubric: 'Стек — LIFO. Очередь — FIFO. Примеры: undo, печать, обход в ширину.',
+            rubric: t(
+              'Стек — LIFO. Очередь — FIFO. Примеры: undo, печать, обход в ширину.',
+              "Stek — LIFO. Navbat — FIFO. Misollar: undo, chop etish navbati, kenglik bo'yicha aylanib chiqish.",
+            ),
           },
         },
       ],
@@ -268,15 +295,24 @@ function mockTickets(): MockTicketSpec[] {
       questions: [
         {
           type: 'single',
-          text: 'Какая структура данных использует принцип FIFO?',
+          text: t(
+            'Какая структура данных использует принцип FIFO?',
+            "Qaysi ma'lumotlar tuzilmasi FIFO tamoyilidan foydalanadi?",
+          ),
           points: 5,
           time: 60,
           difficulty: 'easy',
-          payload: { answers: ['Стек', 'Очередь', 'Дерево', 'Граф'], correct: 1 },
+          payload: {
+            answers: [t('Стек', 'Stek'), t('Очередь', 'Navbat'), t('Дерево', 'Daraxt'), t('Граф', 'Graf')],
+            correct: 1,
+          },
         },
         {
           type: 'numeric',
-          text: 'Сколько сравнений в худшем случае выполнит линейный поиск в массиве из 100 элементов?',
+          text: t(
+            'Сколько сравнений в худшем случае выполнит линейный поиск в массиве из 100 элементов?',
+            '100 elementli massivda chiziqli qidiruv eng yomon holatda nechta taqqoslash bajaradi?',
+          ),
           points: 5,
           time: 60,
           difficulty: 'easy',
@@ -284,13 +320,18 @@ function mockTickets(): MockTicketSpec[] {
         },
         {
           type: 'verbal',
-          text: 'Что такое хеш-таблица? Какие коллизии могут возникнуть и как их разрешать?',
-          points: 10,
+          text: t(
+            'Что такое хеш-таблица? Какие коллизии могут возникнуть и как их разрешать?',
+            "Xesh-jadval nima? Qanday kolliziyalar yuzaga kelishi mumkin va ularni qanday hal qilish mumkin?",
+          ),
+          points: 5,
           time: 180,
           difficulty: 'hard',
           payload: {
-            rubric:
+            rubric: t(
               'Хеш-функция, бакеты, методы разрешения коллизий: цепочки или открытая адресация.',
+              "Xesh-funksiya, bucket'lar, kolliziyalarni hal qilish usullari: zanjirlar yoki ochiq adreslash.",
+            ),
           },
         },
       ],

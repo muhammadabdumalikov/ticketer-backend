@@ -27,7 +27,7 @@ const SAMPLE_QUESTIONS = [
   },
   {
     type: 'verbal', text: 'Расскажите о свойствах нормального распределения. Связь с ЦПТ. Примеры применения.',
-    points: 10, timeSec: 300, difficulty: 'medium',
+    points: 5, timeSec: 300, difficulty: 'medium',
     payload: { rubric: 'Параметры μ и σ; правило 68-95-99,7; ЦПТ; пример (контроль качества, IQ).' },
   },
 ];

@@ -1,5 +1,5 @@
-import { Body, Controller, Delete, Get, HttpCode, Param, ParseUUIDPipe, Patch, Post, UseGuards } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { Body, Controller, Delete, Get, HttpCode, Param, ParseUUIDPipe, Patch, Post, Query, UseGuards } from '@nestjs/common';
+import { ApiBearerAuth, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { PublicUser } from '../users/users.service';
@@ -27,8 +27,9 @@ export class SubjectsController {
 
   @Post('mock')
   @ApiOperation({ summary: 'Seed a demo subject + exam + 3 tickets + sample questions' })
-  createMock(@CurrentUser() user: PublicUser) {
-    return this.subjects.createMock(user.id);
+  @ApiQuery({ name: 'locale', required: false, enum: ['ru', 'uz'] })
+  createMock(@CurrentUser() user: PublicUser, @Query('locale') locale?: string) {
+    return this.subjects.createMock(user.id, locale === 'uz' ? 'uz' : 'ru');
   }
 
   @Delete('mock')

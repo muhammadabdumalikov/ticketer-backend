@@ -112,6 +112,8 @@ export class ExamsService {
       questionCount: r.questionCount,
       ticketCount: r.ticketCount,
       updated: this.relativeTime(r.updatedAt as unknown as Date),
+      // raw timestamp so the client can format "5 min ago" in the viewer's language
+      updatedAt: r.updatedAt,
       author: r.authorName,
       subjectId: r.subjectId,
       subjectName: r.subjectName,
@@ -191,7 +193,7 @@ export class ExamsService {
   // ───────────── Import from .docx (parse only, no persistence) ─────────────
   async parseDocx(file: UploadedDocx | undefined): Promise<ParsedDocxExam> {
     if (!file || !file.buffer || file.size === 0) {
-      throw new BadRequestException('Файл не загружен.');
+      throw new BadRequestException({ code: 'no_file', message: 'Файл не загружен.' });
     }
     const name = (file.originalname ?? '').toLowerCase();
     const isDocx =
@@ -199,14 +201,14 @@ export class ExamsService {
       file.mimetype ===
         'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
     if (!isDocx) {
-      throw new BadRequestException('Поддерживаются только файлы .docx.');
+      throw new BadRequestException({ code: 'not_docx', message: 'Поддерживаются только файлы .docx.' });
     }
     let rawText: string;
     try {
       const result = await mammoth.extractRawText({ buffer: file.buffer });
       rawText = result.value;
     } catch {
-      throw new BadRequestException('Не удалось прочитать файл .docx.');
+      throw new BadRequestException({ code: 'unreadable_docx', message: 'Не удалось прочитать файл .docx.' });
     }
     return parseExamDocx(rawText);
   }
@@ -436,9 +438,12 @@ export class ExamsService {
       case 'multi':
         return { answers: q.answers ?? [], correct: Array.isArray(q.correct) ? q.correct : [] };
       case 'text':
-        return { expected: q.expected ?? '' };
-      case 'numeric':
-        return { expected: q.expected ?? 0, tolerance: q.tolerance ?? 0 };
+        return { expected: q.expected != null ? String(q.expected).trim() : '' };
+      case 'numeric': {
+        // null = no reference answer: left for manual grading instead of "0 is correct".
+        const expected = q.expected === '' || q.expected == null ? NaN : Number(q.expected);
+        return { expected: Number.isFinite(expected) ? expected : null, tolerance: q.tolerance ?? 0 };
+      }
       case 'verbal':
         return { rubric: q.rubric ?? '' };
     }

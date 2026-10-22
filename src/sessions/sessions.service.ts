@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Inject,
   Injectable,
@@ -20,6 +21,19 @@ import type {
   SubmitAnswersDto,
   VerbalActionDto,
 } from './dto/session.dto';
+
+/** Extra time after the exam's duration during which in-flight answers are still accepted. */
+const SUBMIT_GRACE_MS = 2 * 60 * 1000;
+
+/** Trim and collapse inner whitespace so "Ali  Valiyev " and "Ali Valiyev" are one student. */
+function normalizeIdentity(value: string): string {
+  return value.trim().replace(/\s+/g, ' ');
+}
+
+/** Text answers match ignoring case and whitespace differences. */
+function sameText(a: string, b: string): boolean {
+  return normalizeIdentity(a).toLowerCase() === normalizeIdentity(b).toLowerCase();
+}
 
 @Injectable()
 export class SessionsService {
@@ -150,7 +164,7 @@ export class SessionsService {
     if (session.status === 'live') return session;
     if (session.status === 'finished') throw new BadRequestException('Session already finished');
 
-    return this.db.transaction().execute(async (trx) => {
+    const { updated, members } = await this.db.transaction().execute(async (trx) => {
       const updated = await trx
         .updateTable('sessions')
         .set({ status: 'live', startedAt: new Date(), updatedAt: new Date() })
@@ -202,21 +216,32 @@ export class SessionsService {
         .select(['id', 'assignedTicketId'])
         .where('sessionId', '=', id)
         .execute();
-
-      this.gateway.broadcast(id, 'session:start', {
-        sessionId: id,
-        startedAt: updated.startedAt,
-        assignments: members.map((m) => ({ memberId: m.id, ticketId: m.assignedTicketId })),
-      });
-      return updated;
+      return { updated, members };
     });
+
+    // A student who joined while the transaction above was running saw the
+    // session as still scheduled and was not in `unassigned` — hand them a
+    // ticket now that the session is visibly live.
+    for (const m of members) {
+      if (!m.assignedTicketId) m.assignedTicketId = await this.assignTicketIfNeeded(id, m.id);
+    }
+
+    // Broadcast only after commit: students react by fetching `/me`, which must
+    // already see their assigned ticket. Who got which ticket is proctor-only.
+    this.gateway.toStudents(id, 'session:start', { sessionId: id, startedAt: updated.startedAt });
+    this.gateway.toStaff(id, 'session:start', {
+      sessionId: id,
+      startedAt: updated.startedAt,
+      assignments: members.map((m) => ({ memberId: m.id, ticketId: m.assignedTicketId })),
+    });
+    return updated;
   }
 
   async end(teacherId: string, id: string) {
     const session = await this.requireOwned(teacherId, id);
     if (session.status === 'finished') return session;
 
-    return this.db.transaction().execute(async (trx) => {
+    const { updated, autoGradedCount } = await this.db.transaction().execute(async (trx) => {
       // 1) Auto-grade MCQ answers (single/multi) that haven't been graded yet.
       const ungraded = await trx
         .selectFrom('answers as a')
@@ -225,6 +250,8 @@ export class SessionsService {
           'a.id as answerId',
           'a.selectedIndex',
           'a.selectedIndices',
+          'a.textValue',
+          'a.numericValue',
           'q.id as questionId',
           'q.type',
           'q.points',
@@ -232,13 +259,21 @@ export class SessionsService {
         ])
         .where('a.sessionId', '=', id)
         .where('a.pointsAwarded', 'is', null)
-        .where('q.type', 'in', ['single', 'multi'])
+        .where('q.type', 'in', ['single', 'multi', 'text', 'numeric'])
         .execute();
 
+      let autoGradedCount = 0;
       for (const row of ungraded) {
         const payload = (row.payload ?? {}) as {
           correct?: number | number[];
+          expected?: string | number | null;
+          tolerance?: number;
         };
+        // Without a reference answer a text/numeric question is left for manual grading.
+        const expected = payload.expected;
+        if (row.type === 'text' && (typeof expected !== 'string' || expected.trim() === '')) continue;
+        if (row.type === 'numeric' && typeof expected !== 'number') continue;
+
         let award = 0;
         if (row.type === 'single' && typeof payload.correct === 'number') {
           if (row.selectedIndex != null && row.selectedIndex === payload.correct) {
@@ -252,7 +287,16 @@ export class SessionsService {
           const sameLength = got.length === correct.length;
           const sameMembers = correct.every((c) => got.includes(c));
           if (sameLength && sameMembers) award = row.points;
+        } else if (row.type === 'text' && typeof expected === 'string') {
+          if (row.textValue != null && sameText(row.textValue, expected)) award = row.points;
+        } else if (row.type === 'numeric' && typeof expected === 'number') {
+          const tolerance = Math.abs(payload.tolerance ?? 0);
+          // epsilon absorbs float noise, e.g. 0.1 + 0.2 vs 0.3
+          if (row.numericValue != null && Math.abs(row.numericValue - expected) <= tolerance + 1e-9) {
+            award = row.points;
+          }
         }
+        autoGradedCount++;
         await trx
           .updateTable('answers')
           .set({
@@ -272,14 +316,15 @@ export class SessionsService {
         .where('id', '=', id)
         .returningAll()
         .executeTakeFirstOrThrow();
-
-      this.gateway.broadcast(id, 'session:end', {
-        sessionId: id,
-        endedAt: updated.endedAt,
-        autoGradedCount: ungraded.length,
-      });
-      return updated;
+      return { updated, autoGradedCount };
     });
+
+    this.gateway.broadcast(id, 'session:end', {
+      sessionId: id,
+      endedAt: updated.endedAt,
+      autoGradedCount,
+    });
+    return updated;
   }
 
   // ─────────── Student ───────────
@@ -290,17 +335,44 @@ export class SessionsService {
       .select(['id', 'status', 'examId', 'ticketsPolicy'])
       .where('id', '=', sessionId)
       .executeTakeFirst();
-    if (!session) throw new NotFoundException('Session not found');
-    if (session.status === 'finished') throw new BadRequestException('Session is finished');
+    if (!session) {
+      throw new NotFoundException({ code: 'session_not_found', message: 'Session not found' });
+    }
+    if (session.status === 'finished') {
+      throw new BadRequestException({ code: 'session_finished', message: 'Session is finished' });
+    }
 
-    // Reconnect: same (name, group) returns the same member with a fresh token.
+    const name = normalizeIdentity(dto.name);
+    const group = normalizeIdentity(dto.group);
+    const studentNumber = dto.studentNumber ? normalizeIdentity(dto.studentNumber) : null;
+
+    // Reconnect: same (name, group) — ignoring case and spacing — returns the
+    // same member with a fresh token.
     const existing = await this.db
       .selectFrom('roomMembers')
-      .select(['id'])
+      .select(['id', 'studentNumber'])
       .where('sessionId', '=', sessionId)
-      .where('name', '=', dto.name)
-      .where('groupName', '=', dto.group)
+      .where(sql<string>`lower(name)`, '=', name.toLowerCase())
+      .where(sql<string>`lower(group_name)`, '=', group.toLowerCase())
       .executeTakeFirst();
+
+    if (existing) {
+      // Two different students with the same name in one group.
+      if (existing.studentNumber && studentNumber && existing.studentNumber !== studentNumber) {
+        throw new ConflictException({
+          code: 'identity_mismatch',
+          message: 'Another student with this name has already joined this group',
+        });
+      }
+      // Taking over a seat that is live elsewhere would silently kick that
+      // student out — refuse; once the other tab closes or drops (≈1 min), it's free.
+      if (await this.gateway.isMemberConnected(existing.id)) {
+        throw new ConflictException({
+          code: 'seat_in_use',
+          message: 'This student is already connected from another tab or device',
+        });
+      }
+    }
 
     const token = generateToken();
     const tokenHash = hashToken(token);
@@ -314,7 +386,7 @@ export class SessionsService {
           sessionTokenHash: tokenHash,
           online: true,
           lastSeenAt: new Date(),
-          studentNumber: dto.studentNumber ?? null,
+          studentNumber: studentNumber ?? existing.studentNumber,
         })
         .where('id', '=', existing.id)
         .execute();
@@ -323,9 +395,9 @@ export class SessionsService {
         .insertInto('roomMembers')
         .values({
           sessionId,
-          name: dto.name,
-          groupName: dto.group,
-          studentNumber: dto.studentNumber ?? null,
+          name,
+          groupName: group,
+          studentNumber,
           online: true,
           sessionTokenHash: tokenHash,
         } as any)
@@ -337,49 +409,12 @@ export class SessionsService {
     // If the session is already live (i.e. the teacher already clicked
     // Запустить before this student joined), assign them a random ticket
     // right now so `getMe` returns it and the student lands on Ticket view.
-    let member = await this.db
+    if (session.status === 'live') await this.assignTicketIfNeeded(sessionId, memberId);
+    const member = await this.db
       .selectFrom('roomMembers')
       .selectAll()
       .where('id', '=', memberId)
       .executeTakeFirstOrThrow();
-
-    if (session.status === 'live' && !member.assignedTicketId) {
-      const pool = await this.db
-        .selectFrom('tickets')
-        .select(['id'])
-        .where('examId', '=', session.examId)
-        .orderBy('position')
-        .execute();
-      if (pool.length > 0) {
-        // Prefer an unused ticket when policy is one-per-student and there's
-        // still a fresh билет available — otherwise fall back to random from
-        // the full pool (covers `allow-duplicates` and the case where
-        // students > tickets).
-        let candidatePool = pool;
-        if (session.ticketsPolicy === 'one-per-student') {
-          const taken = await this.db
-            .selectFrom('roomMembers')
-            .select(['assignedTicketId'])
-            .where('sessionId', '=', sessionId)
-            .where('assignedTicketId', 'is not', null)
-            .execute();
-          const takenSet = new Set(taken.map((t) => t.assignedTicketId));
-          const unused = pool.filter((t) => !takenSet.has(t.id));
-          if (unused.length > 0) candidatePool = unused;
-        }
-        const ticketId = candidatePool[Math.floor(Math.random() * candidatePool.length)].id;
-        await this.db
-          .updateTable('roomMembers')
-          .set({ assignedTicketId: ticketId })
-          .where('id', '=', memberId)
-          .execute();
-        member = await this.db
-          .selectFrom('roomMembers')
-          .selectAll()
-          .where('id', '=', memberId)
-          .executeTakeFirstOrThrow();
-      }
-    }
 
     this.gateway.broadcast(sessionId, 'session:join', {
       sessionId,
@@ -398,6 +433,15 @@ export class SessionsService {
   }
 
   async getMe(sessionId: string, memberId: string) {
+    const session = await this.db
+      .selectFrom('sessions')
+      .select(['status', 'startedAt', 'endedAt'])
+      .where('id', '=', sessionId)
+      .executeTakeFirstOrThrow();
+    // Self-heal: a live session never leaves a student without a ticket, even
+    // if they slipped past the assignment in `start()`.
+    if (session.status === 'live') await this.assignTicketIfNeeded(sessionId, memberId);
+
     const member = await this.db
       .selectFrom('roomMembers')
       .selectAll()
@@ -427,10 +471,61 @@ export class SessionsService {
       };
     }
 
-    return { member, assignedTicket, sessionId };
+    // The student's saved answers + verbal timing, so a reloaded or reconnected
+    // page can restore its state. Grades and notes stay teacher-only.
+    const answers = await this.db
+      .selectFrom('answers')
+      .select([
+        'questionId',
+        'selectedIndex',
+        'selectedIndices',
+        'textValue',
+        'numericValue',
+        'startedAt',
+        'endedAt',
+        'durationSec',
+      ])
+      .where('sessionId', '=', sessionId)
+      .where('roomMemberId', '=', memberId)
+      .execute();
+
+    return { member, assignedTicket, sessionId, session, answers };
   }
 
   async submitAnswers(sessionId: string, memberId: string, dto: SubmitAnswersDto) {
+    const ctx = await this.db
+      .selectFrom('roomMembers as m')
+      .innerJoin('sessions as s', 's.id', 'm.sessionId')
+      .innerJoin('exams as e', 'e.id', 's.examId')
+      .select(['m.assignedTicketId', 's.status', 's.startedAt', 'e.durationMin'])
+      .where('m.id', '=', memberId)
+      .where('m.sessionId', '=', sessionId)
+      .executeTakeFirstOrThrow();
+
+    // `exam_closed`: the session is over, the client leaves. `time_over`: written
+    // answers are closed, but the student may still be waiting for a verbal turn.
+    if (ctx.status !== 'live' || !ctx.startedAt) {
+      throw new BadRequestException({ code: 'exam_closed', message: 'Session is not live' });
+    }
+    const deadline = new Date(ctx.startedAt).getTime() + ctx.durationMin * 60_000 + SUBMIT_GRACE_MS;
+    if (Date.now() > deadline) {
+      throw new BadRequestException({ code: 'time_over', message: 'Exam time is over' });
+    }
+
+    // Only auto-checked questions of the student's own ticket; verbal answers
+    // are recorded by the proctor.
+    const allowed = ctx.assignedTicketId
+      ? await this.db
+          .selectFrom('questions')
+          .select(['id'])
+          .where('ticketId', '=', ctx.assignedTicketId)
+          .where('type', '!=', 'verbal')
+          .execute()
+      : [];
+    const allowedIds = new Set(allowed.map((q) => q.id));
+    const foreign = dto.answers.find((a) => !allowedIds.has(a.questionId));
+    if (foreign) throw new BadRequestException(`Question ${foreign.questionId} is not on your ticket`);
+
     for (const a of dto.answers) {
       await this.upsertAnswer(sessionId, memberId, a);
     }
@@ -449,7 +544,7 @@ export class SessionsService {
       .where('roomMemberId', '=', dto.memberId)
       .where('questionId', '=', dto.questionId)
       .execute();
-    this.gateway.broadcast(sessionId, 'verbal:status', {
+    this.gateway.toMember(sessionId, dto.memberId, 'verbal:status', {
       sessionId,
       memberId: dto.memberId,
       questionId: dto.questionId,
@@ -475,7 +570,7 @@ export class SessionsService {
       .where('roomMemberId', '=', dto.memberId)
       .where('questionId', '=', dto.questionId)
       .execute();
-    this.gateway.broadcast(sessionId, 'verbal:status', {
+    this.gateway.toMember(sessionId, dto.memberId, 'verbal:status', {
       sessionId,
       memberId: dto.memberId,
       questionId: dto.questionId,
@@ -500,7 +595,8 @@ export class SessionsService {
       .where('roomMemberId', '=', dto.memberId)
       .where('questionId', '=', dto.questionId)
       .execute();
-    this.gateway.broadcast(sessionId, 'grade:save', {
+    // Grades go to the proctor only — never to the students in the room.
+    this.gateway.toStaff(sessionId, 'grade:save', {
       sessionId,
       memberId: dto.memberId,
       questionId: dto.questionId,
@@ -509,6 +605,59 @@ export class SessionsService {
   }
 
   // ─────────── Helpers ───────────
+
+  /**
+   * Give a member of a live session a random ticket if they have none yet.
+   * Prefers an unused ticket under `one-per-student` while fresh билеты remain,
+   * otherwise picks from the full pool (`allow-duplicates`, or students > tickets).
+   * Returns the member's ticket id (existing or new), or null if the pool is empty.
+   */
+  private async assignTicketIfNeeded(sessionId: string, memberId: string): Promise<string | null> {
+    const member = await this.db
+      .selectFrom('roomMembers as m')
+      .innerJoin('sessions as s', 's.id', 'm.sessionId')
+      .select(['m.assignedTicketId', 's.examId', 's.ticketsPolicy'])
+      .where('m.id', '=', memberId)
+      .where('m.sessionId', '=', sessionId)
+      .executeTakeFirst();
+    if (!member) return null;
+    if (member.assignedTicketId) return member.assignedTicketId;
+
+    const pool = await this.db
+      .selectFrom('tickets')
+      .select(['id'])
+      .where('examId', '=', member.examId)
+      .orderBy('position')
+      .execute();
+    if (pool.length === 0) return null;
+
+    let candidatePool = pool;
+    if (member.ticketsPolicy === 'one-per-student') {
+      const taken = await this.db
+        .selectFrom('roomMembers')
+        .select(['assignedTicketId'])
+        .where('sessionId', '=', sessionId)
+        .where('assignedTicketId', 'is not', null)
+        .execute();
+      const takenSet = new Set(taken.map((t) => t.assignedTicketId));
+      const unused = pool.filter((t) => !takenSet.has(t.id));
+      if (unused.length > 0) candidatePool = unused;
+    }
+    const ticketId = candidatePool[Math.floor(Math.random() * candidatePool.length)].id;
+    // Guard on `is null` so two concurrent calls can't overwrite each other.
+    await this.db
+      .updateTable('roomMembers')
+      .set({ assignedTicketId: ticketId })
+      .where('id', '=', memberId)
+      .where('assignedTicketId', 'is', null)
+      .execute();
+    const row = await this.db
+      .selectFrom('roomMembers')
+      .select(['assignedTicketId'])
+      .where('id', '=', memberId)
+      .executeTakeFirstOrThrow();
+    return row.assignedTicketId;
+  }
 
   private async requireOwned(teacherId: string, sessionId: string) {
     const s = await this.db
@@ -522,14 +671,6 @@ export class SessionsService {
   }
 
   private async upsertAnswer(sessionId: string, memberId: string, a: AnswerItemDto) {
-    const existing = await this.db
-      .selectFrom('answers')
-      .select(['id'])
-      .where('sessionId', '=', sessionId)
-      .where('roomMemberId', '=', memberId)
-      .where('questionId', '=', a.questionId)
-      .executeTakeFirst();
-
     const fields = {
       selectedIndex: a.selectedIndex ?? null,
       selectedIndices: a.selectedIndices ? JSON.stringify(a.selectedIndices) : null,
@@ -537,29 +678,22 @@ export class SessionsService {
       numericValue: a.numericValue ?? null,
       updatedAt: new Date(),
     };
-
-    if (existing) {
-      await this.db.updateTable('answers').set(fields as any).where('id', '=', existing.id).execute();
-    } else {
-      await this.db
-        .insertInto('answers')
-        .values({ sessionId, roomMemberId: memberId, questionId: a.questionId, ...(fields as any) })
-        .execute();
-    }
+    // Single statement, so two concurrent saves of one answer can't collide on
+    // the (session, member, question) unique constraint.
+    await this.db
+      .insertInto('answers')
+      .values({ sessionId, roomMemberId: memberId, questionId: a.questionId, ...(fields as any) })
+      .onConflict((oc) =>
+        oc.columns(['sessionId', 'roomMemberId', 'questionId']).doUpdateSet(fields as any),
+      )
+      .execute();
   }
 
   private async ensureAnswerRow(sessionId: string, memberId: string, questionId: string) {
-    const row = await this.db
-      .selectFrom('answers')
-      .select(['id'])
-      .where('sessionId', '=', sessionId)
-      .where('roomMemberId', '=', memberId)
-      .where('questionId', '=', questionId)
-      .executeTakeFirst();
-    if (row) return;
     await this.db
       .insertInto('answers')
       .values({ sessionId, roomMemberId: memberId, questionId } as any)
+      .onConflict((oc) => oc.columns(['sessionId', 'roomMemberId', 'questionId']).doNothing())
       .execute();
   }
 

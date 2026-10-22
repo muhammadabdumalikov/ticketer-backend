@@ -103,9 +103,12 @@ export class TicketsService {
       case 'multi':
         return { answers: q.answers ?? [], correct: Array.isArray(q.correct) ? q.correct : [] };
       case 'text':
-        return { expected: q.expected ?? '' };
-      case 'numeric':
-        return { expected: q.expected ?? 0, tolerance: q.tolerance ?? 0 };
+        return { expected: q.expected != null ? String(q.expected).trim() : '' };
+      case 'numeric': {
+        // null = no reference answer: left for manual grading instead of "0 is correct".
+        const expected = q.expected === '' || q.expected == null ? NaN : Number(q.expected);
+        return { expected: Number.isFinite(expected) ? expected : null, tolerance: q.tolerance ?? 0 };
+      }
       case 'verbal':
         return { rubric: q.rubric ?? '' };
     }

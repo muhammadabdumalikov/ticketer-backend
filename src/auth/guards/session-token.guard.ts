@@ -28,10 +28,12 @@ export class SessionTokenGuard implements CanActivate {
     const sessionId: string | undefined = req.params?.id ?? req.params?.sessionId;
     if (!sessionId) throw new UnauthorizedException('Missing session id');
 
+    // An explicit header wins over the cookie: the cookie is shared by every
+    // tab in the browser and always belongs to the last student who joined.
     const token: string | undefined =
-      req.cookies?.[SESSION_TOKEN_COOKIE] ??
       req.headers?.[SESSION_TOKEN_HEADER] ??
-      (req.query?.sessionToken as string | undefined);
+      (req.query?.sessionToken as string | undefined) ??
+      req.cookies?.[SESSION_TOKEN_COOKIE];
     if (!token) throw new UnauthorizedException('Missing session token');
 
     const member = await this.db

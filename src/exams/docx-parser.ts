@@ -36,7 +36,7 @@ export interface ParsedDocxExam {
 
 // Sensible defaults for an open-ended oral-exam question. The teacher can tune
 // points/time per question in the builder before publishing.
-const DEFAULT_POINTS = 10;
+const DEFAULT_POINTS = 5;
 const DEFAULT_TIME_SEC = 300;
 
 /**
@@ -118,18 +118,20 @@ export function parseExamDocx(rawText: string): ParsedDocxExam {
       .filter((t) => t.length > 0)
       .map(makeQuestion);
     if (questions.length === 0) {
-      throw new BadRequestException(
-        'Не удалось найти вопросы в документе. Проверьте формат файла.',
-      );
+      throw new BadRequestException({
+        code: 'no_questions',
+        message: 'Не удалось найти вопросы в документе. Проверьте формат файла.',
+      });
     }
     return { tickets: [{ questions }] };
   }
 
   const nonEmpty = tickets.filter((t) => t.questions.length > 0);
   if (nonEmpty.length === 0) {
-    throw new BadRequestException(
-      'Найдены варианты, но без вопросов. Добавьте вопросы под каждым вариантом.',
-    );
+    throw new BadRequestException({
+      code: 'variants_without_questions',
+      message: 'Найдены варианты, но без вопросов. Добавьте вопросы под каждым вариантом.',
+    });
   }
 
   return { title, tickets: nonEmpty };
