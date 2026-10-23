@@ -432,6 +432,34 @@ export class SessionsService {
     return { sessionToken: token, member };
   }
 
+  /**
+   * What a student may know about a session before joining it: the subject, the
+   * exam, its length and who runs it. The session id (an unguessable uuid in the
+   * shared link) is the only credential. Tickets and questions are never exposed.
+   */
+  async getPublic(sessionId: string) {
+    const row = await this.db
+      .selectFrom('sessions as se')
+      .innerJoin('exams as e', 'e.id', 'se.examId')
+      .innerJoin('subjects as su', 'su.id', 'e.subjectId')
+      .innerJoin('users as u', 'u.id', 'se.teacherId')
+      .select([
+        'se.id',
+        'se.status',
+        'e.title as examTitle',
+        'e.durationMin',
+        'su.name as subjectName',
+        'su.code as subjectCode',
+        'u.name as teacherName',
+      ])
+      .where('se.id', '=', sessionId)
+      .executeTakeFirst();
+    if (!row) {
+      throw new NotFoundException({ code: 'session_not_found', message: 'Session not found' });
+    }
+    return row;
+  }
+
   async getMe(sessionId: string, memberId: string) {
     const session = await this.db
       .selectFrom('sessions')

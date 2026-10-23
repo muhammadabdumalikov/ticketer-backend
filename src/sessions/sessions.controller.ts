@@ -92,6 +92,14 @@ export class SessionsController {
   }
 
   // ── Student ──
+  @Get(':id/public')
+  @ApiOperation({
+    summary: '[student] Public session info for the join page (subject, exam, duration, teacher)',
+  })
+  getPublic(@Param('id', ParseUUIDPipe) id: string) {
+    return this.sessions.getPublic(id);
+  }
+
   @Post(':id/members')
   @ApiOperation({
     summary: '[student] Join session (anon) — sets `ticketer_session` cookie; same name+group rejoins',
