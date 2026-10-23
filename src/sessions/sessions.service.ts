@@ -449,6 +449,7 @@ export class SessionsService {
       .executeTakeFirstOrThrow();
 
     let assignedTicket: any = null;
+    let ticketQuestions: Array<{ id: string; type: string; points: number }> = [];
     if (member.assignedTicketId) {
       const ticket = await this.db
         .selectFrom('tickets as t')
@@ -462,6 +463,7 @@ export class SessionsService {
         .where('ticketId', '=', ticket.id)
         .orderBy('position')
         .execute();
+      ticketQuestions = questions.map((q) => ({ id: q.id, type: q.type, points: q.points }));
       assignedTicket = {
         id: ticket.id,
         title: ticket.title,
@@ -489,7 +491,32 @@ export class SessionsService {
       .where('roomMemberId', '=', memberId)
       .execute();
 
-    return { member, assignedTicket, sessionId, session, answers };
+    // Points are shown to the student only once the exam is over.
+    let result: { earned: number; max: number; pending: number; total: number } | null = null;
+    if (session.status === 'finished' && ticketQuestions.length > 0) {
+      const graded = await this.db
+        .selectFrom('answers')
+        .select(['questionId', 'pointsAwarded'])
+        .where('sessionId', '=', sessionId)
+        .where('roomMemberId', '=', memberId)
+        .execute();
+      const byQuestion = new Map(graded.map((g) => [g.questionId, g.pointsAwarded]));
+      let earned = 0;
+      let max = 0;
+      let pending = 0;
+      for (const q of ticketQuestions) {
+        max += q.points;
+        const awarded = byQuestion.get(q.id);
+        if (awarded != null) earned += awarded;
+        // Still waiting for the teacher: verbal answers, and written answers that
+        // have no reference answer to check against. An unanswered auto-checked
+        // question has no row and simply scores 0.
+        else if (q.type === 'verbal' || byQuestion.has(q.id)) pending += 1;
+      }
+      result = { earned, max, pending, total: ticketQuestions.length };
+    }
+
+    return { member, assignedTicket, sessionId, session, answers, result };
   }
 
   async submitAnswers(sessionId: string, memberId: string, dto: SubmitAnswersDto) {

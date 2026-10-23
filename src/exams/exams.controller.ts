@@ -123,7 +123,7 @@ export class ExamsController {
   @Post('exams/:id/launch')
   @ApiOperation({
     summary:
-      'Reuse-or-create a session, mark it live, broadcast session:start with random ticket per member.',
+      'Reuse-or-create a session and open it as a waiting room. Starting it (random ticket per member) is a separate POST /sessions/:id/start.',
   })
   launch(@CurrentUser() user: PublicUser, @Param('id', ParseUUIDPipe) id: string) {
     return this.exams.launch(user.id, id);

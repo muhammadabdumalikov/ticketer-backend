@@ -42,13 +42,14 @@ export class ExamsService {
   // ───────────── Launch ─────────────
   /**
    * One-click "Запустить" path: reuse a pre-shared scheduled session if any,
-   * otherwise create one — then immediately call `sessions.start` so connected
-   * students get the broadcast and a random ticket from the exam's pool.
+   * otherwise create one, and open it as a waiting room. The session is NOT
+   * started here — students gather in the room and the teacher starts it from
+   * the session page once everyone is in (`sessions.start` then hands each
+   * student a ticket). A session that is already live is returned as is.
    */
   async launch(teacherId: string, examId: string) {
     const share = await this.findOrCreateShareSession(teacherId, examId);
-    const session = await this.sessionsService.start(teacherId, share.sessionId);
-    return { sessionId: share.sessionId, status: session.status };
+    return { sessionId: share.sessionId, status: share.status };
   }
 
   // ───────────── Listing ─────────────
